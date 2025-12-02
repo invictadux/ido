@@ -16,3 +16,6 @@
 .vscode/
 .idea/
 *.swp
+
+/testing
+main.go
