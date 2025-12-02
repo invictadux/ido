@@ -1,4 +1,4 @@
-package ido2
+package test
 
 import (
 	"fmt"

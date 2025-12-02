@@ -1,8 +1,6 @@
 package main
 
 import (
-	"dux/ido"
-	"dux/ido2"
 	"encoding/json"
 	"fmt"
 	"time"
@@ -76,7 +74,7 @@ func test1() {
 	})
 
 	start := time.Now()
-	data, _ := ido2.Marshal(obj)
+	data, _ := Marshal(obj)
 	fmt.Printf("ido: %d, time: %s\n", len(data), time.Since(start))
 
 	start = time.Now()
@@ -85,7 +83,7 @@ func test1() {
 
 	start = time.Now()
 	var obj1 Data
-	ido.Unmarshal(data, &obj1)
+	Unmarshal(data, &obj1)
 	fmt.Printf("ido unmarshal time: %s\n", time.Since(start))
 }
 
@@ -115,7 +113,7 @@ func test2() {
 	}
 
 	start := time.Now()
-	data, _ := ido.Marshal(obj)
+	data, _ := Marshal(obj)
 	fmt.Printf("ido: %d, time: %s\n", len(data), time.Since(start))
 
 	start = time.Now()
@@ -124,7 +122,7 @@ func test2() {
 
 	start = time.Now()
 	var obj1 Data
-	ido.Unmarshal(data, &obj1)
+	Unmarshal(data, &obj1)
 	fmt.Printf("ido unmarshal time: %s\n", time.Since(start))
 
 	start = time.Now()
@@ -159,7 +157,7 @@ func test3() {
 	}
 
 	start1 := time.Now()
-	data, _ := ido.Marshal(obj)
+	data, _ := Marshal(obj)
 	end1 := time.Since(start1)
 	//fmt.Println(data)
 
@@ -211,14 +209,14 @@ func test5() {
 		Bank:     bank,
 	}
 
-	data, _ := ido.Marshal(person)
+	data, _ := Marshal(person)
 	fmt.Println(string(data))
 
 	data2, _ := json.Marshal(person)
 	fmt.Println(string(data2))
 
 	newBank := Bank{}
-	ido.Unmarshal(data, &newBank)
+	Unmarshal(data, &newBank)
 }
 
 func main() {
