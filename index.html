@@ -1,0 +1,97 @@
+<!DOCTYPE html>
+<html>
+    <head>
+        <title>Dux</title>
+        <script type="text/javascript" src="/home/dux/Desktop/github projects/duxformat/gido.js"></script>
+    </head>
+
+    <body>
+        <script type="text/javascript">
+            class Person {
+                constructor() {
+                    this.firstName = "";
+                    this.lastName = "";
+                    this.maried = false;
+                    this.numbers = [0];
+                    this.floats = [0.1],
+                    this.booleans = [false],
+                    this.strings = [""];
+                    this.objArray = [new Other()];
+                    this.nestedArray = [[new Other()]];
+                    this.age = 0;
+                    this.money = 0.1;
+                    this.address = {
+                        street: "",
+                        city: "",
+                        zipCode: 0
+                    };
+                    this.email = "";
+                }
+            }
+
+            class Other {
+                constructor() {
+                    this.name = "";
+                    this.age = 0;
+                }
+            }
+
+            const person = new Person();
+
+            person.firstName = "Dan";
+            person.lastName = "Popa";
+            person.maried = false;
+            person.numbers = [1,2,3];
+            person.floats = [1.2,2.4,3.1];
+            person.booleans = [false,true,true,false,false,true,true];
+            person.strings = ["one","two","three"];
+            person.objArray = [{name:"Alex", age: 45}, {name:"Victor", age: 27}, {name:"Dan", age: 24}];
+            person.nestedArray = [];
+            person.age = 24;
+            person.money = 10000.5;
+            person.address.street = "Joaquin Bustamante";
+            person.address.city = "Santander";
+            person.address.zipCode = 39011;
+            person.email = "invictadux@protonmail.com"
+
+            for (var i = 0; i < 100000; i++) {
+                var other = new Other();
+                other.name = 'Dan';
+                other.age = 24;
+                person.nestedArray.push([other]);
+            }
+
+            const time1 = performance.now();
+            var data = GIDO.Marshal(person);
+            const elapsed1 = performance.now() - time1;
+
+            const time2 = performance.now();
+            dataJSON = JSON.stringify(person)
+            const elapsed2 = performance.now() - time2;
+
+            //console.log(data);
+            console.log(`GIDO Marshal time: ${elapsed1}ms`);
+            //console.log(dataJSON);
+            console.log(`JSON Marshal time: ${elapsed2}ms`);
+
+            const person2 = new Person();
+            const time3 = performance.now();
+            GIDO.Unmarshal(data, person2);
+            const elapsed3 = performance.now() - time3;
+            const time4 = performance.now();
+            JSON.parse(dataJSON);
+            const elapsed4 = performance.now() - time4;
+
+            console.log(`GIDO Unmarshal time: ${elapsed3}ms`);
+            console.log(`JSON Unmarshal time: ${elapsed4}ms`);
+
+            /*for (const key in person2) {
+                console.log(`${key}: ${person2[key]}`);
+            }
+
+            console.log(`street: ${person2.address.street}`);
+            console.log(`city: ${person2.address.city}`);
+            console.log(`zipCode: ${person2.address.zipCode}`);*/
+        </script>
+    </body>
+</html>
