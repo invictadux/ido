@@ -18,4 +18,4 @@
 *.swp
 
 /testing
-main.go
+/main.go
