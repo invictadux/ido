@@ -1,4 +1,4 @@
-module dux
+module ido
 
 go 1.21.3
 
