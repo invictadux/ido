@@ -144,46 +144,29 @@ func main() {
 
     start := time.Now()
     data, _ := ido.Marshal(obj)
-    fmt.Printf("ido: %d bytes, time: %s\n", len(data), time.Since(start))
+    fmt.Printf("ido: %d, time: %s\n", len(data), time.Since(start))
 
     start = time.Now()
     j, _ := json.Marshal(obj)
-    fmt.Printf("json: %d bytes, time: %s\n", len(j), time.Since(start))
+    fmt.Printf("json: %d, time: %s\n", len(j), time.Since(start))
 
     start = time.Now()
     var obj1 Data
-    ido.Unmarshal(data, &obj1)
-    fmt.Printf("ido unmarshal time: %s\n", time.Since(start))
+    err := ido.Unmarshal(data, &obj1)
+    fmt.Printf("ido unmarshal time: %s, err: %v\n", time.Since(start), err)
 
     start = time.Now()
     var obj3 Data
-    json.Unmarshal(j, &obj3)
-    fmt.Printf("json unmarshal time: %s\n", time.Since(start))
+    err = json.Unmarshal(j, &obj3)
+    fmt.Printf("json unmarshal time: %s, err: %v\n", time.Since(start), err)
 }
 ```
 
 #### Result
 
 ```
-ido: 16500360 bytes, time: 206.277902ms
-json: 32700878 bytes, time: 179.830669ms
-ido unmarshal time: 3.510210995s
-json unmarshal time: 575.262592ms
+ido: 165000337, time: 620.132852ms
+json: 327000924, time: 1.216462615s
+ido unmarshal time: 2.66366359s, err: <nil>
+json unmarshal time: 5.228011242s, err: <nil>
 ```
-
-### Important Note
-
-These benchmarks are early-stage results.
-IDO is still a work in progress, and both the marshaling and unmarshaling implementations are being continuously optimized.
-
-- Faster unmarshaling in future releases
-
-- Potential improvements in marshal speed
-
-- Even smaller encoded size through layout optimizations
-
-- Better memory usage
-
-- Parallel decoding/encoding experiments
-
-As the format and library evolve, performance will significantly improve. The current numbers are only a baseline.
