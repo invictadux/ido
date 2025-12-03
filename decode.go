@@ -1,585 +1,467 @@
 package ido
 
 import (
+	"bufio"
 	"fmt"
+	"io"
 	"reflect"
 	"strconv"
-	"strings"
+	"sync"
 	"time"
 )
 
-// !
-// "
-// #
-// $
-// %
-// &
-// '
-// (
-// )
-// *
-// + bool -> true
-// , none -> data separator symbol
-// - bool -> false
-// .
-// /
-// :
-// ;
-// <
-// =
-// >
-// ?
-// @
-// _
-// `
-// { struct -> start of struct
-// |
-// } struct -> end of struct
-// ~
-// [ slice -> start of array
-// ] slice -> end of array
+// ---------------------------------------------------------
+// INTERFACES
+// ---------------------------------------------------------
 
-// data types
-
-// Bool +
-// Int +
-// Int8 +
-// Int16 +
-// Int32 +
-// Int64 +
-// Uint +
-// Uint8 +
-// Uint16 +
-// Uint32 +
-// Uint64 +
-// Uintptr
-// Float32 +
-// Float64 +
-// Complex64
-// Complex128
-// Array
-// Chan
-// Func
-// Interface
-// Map +
-// Pointer
-// Slice +
-// String +
-// Struct +
-// UnsafePointer
-
-/*
-The data types used are
-
-Number: a signed decimal number that may contain a fractional part.
-The format makes distinction between integer and floating-point.
-
-String: the same exact characters, may be excaped
-
-Boolean: - false and + true
-
-Array: can make distinction between string, int and float arrays,
-all values in the array have to be the same.
-
-Struct: a collection of values.
-
-null: nothing is used, can be seen as comma and another comma
-*/
-
-func Validate(v string, mut reflect.Value, i *int) error {
-	if len(v) == 0 {
-		return nil
-	}
-
-	t := mut.Type().Field(*i)
-
-	switch k := t.Type.Kind(); k {
-	case reflect.String:
-		mut.FieldByName(t.Name).SetString(v[1 : len(v)-1])
-	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
-		n, err := strconv.ParseInt(v, 10, 64)
-
-		if err != nil {
-			return err
-		}
-
-		mut.FieldByName(t.Name).SetInt(n)
-	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
-		n, err := strconv.ParseUint(v, 10, 32)
-
-		if err != nil {
-			return err
-		}
-
-		mut.FieldByName(t.Name).SetUint(n)
-	case reflect.Float32, reflect.Float64:
-		n, err := strconv.ParseFloat(v, 64)
-
-		if err != nil {
-			return err
-		}
-
-		mut.FieldByName(t.Name).SetFloat(n)
-	case reflect.Bool:
-		switch v {
-		case "":
-			mut.FieldByName(t.Name).SetBool(false)
-		case "+":
-			mut.FieldByName(t.Name).SetBool(true)
-		default:
-			return fmt.Errorf("expecting '' or + found: %v", v)
-		}
-	case reflect.Slice:
-		err := UnmarshalSlice(mut.Field(*i), v)
-
-		if err != nil {
-			return err
-		}
-	default:
-		if t.Type == reflect.TypeOf(time.Time{}) {
-			n, _ := strconv.ParseInt(v, 10, 64)
-			mut.FieldByName(t.Name).Set(reflect.ValueOf(time.UnixMicro(n)))
-		}
-	}
-
-	return nil
+// Unmarshaler allows types to customize their IDO decoding.
+type Unmarshaler interface {
+	UnmarshalIDO([]byte) error
 }
 
-func UnmarshalSliceString(f reflect.Value, data string) error {
-	i := 0
-	start_i := 0
-	inString := false
-	data_len := len(data)
-	arr := []string{}
+// ---------------------------------------------------------
+// CACHE
+// ---------------------------------------------------------
 
-	for i < data_len {
-		switch data[i] {
-		case ',', ']':
-			if !inString {
-				arr = append(arr, data[start_i+1:i-1])
-			}
-		case '"':
-			if !inString {
-				inString = true
-				start_i = i
-			} else {
-				inString = false
-			}
-		case '\\':
-			i++
-		}
+type decoderFunc func(d []byte, v reflect.Value) error
 
-		i++
-	}
+var decoderCache sync.Map // map[reflect.Type]decoderFunc
+var unmarshalerType = reflect.TypeOf((*Unmarshaler)(nil)).Elem()
 
-	f.Set(reflect.ValueOf(arr))
-	return nil
+// NOTE: timeType and unsafeString are defined in encode.go and shared.
+
+// ---------------------------------------------------------
+// STREAMING API (Decoder)
+// ---------------------------------------------------------
+
+// Decoder reads IDO values from an input stream.
+type Decoder struct {
+	r   *bufio.Reader
+	buf []byte
 }
 
-func UnmarshalSliceStruct(f reflect.Value, data string) error {
-	i := 1
-	start_i := 1
-	inStruct := 0
-	inString := false
-	data_len := len(data)
-	arr := f
+func NewDecoder(r io.Reader) *Decoder {
+	return &Decoder{
+		r:   bufio.NewReader(r),
+		buf: make([]byte, 0, 1024),
+	}
+}
 
-	for i < data_len {
-		switch data[i] {
-		case ',', ']':
-			if inStruct == 0 && !inString {
-				ev := data[start_i:i]
-				c := reflect.New(f.Type().Elem()).Interface()
-				err := Unmarshal([]byte(ev), c)
+func (d *Decoder) Decode(v any) error {
+	token, err := d.nextObject()
+	if err != nil {
+		return err
+	}
+	return Unmarshal(token, v)
+}
 
-				if err != nil {
-					return err
+func (d *Decoder) nextObject() ([]byte, error) {
+	for {
+		advance, valid := scanObjectBoundary(d.buf)
+		if valid {
+			obj := d.buf[:advance]
+
+			// Copy is required because Unmarshal (and custom unmarshalers)
+			// might retain the slice data.
+			result := make([]byte, advance)
+			copy(result, obj)
+
+			copy(d.buf, d.buf[advance:])
+			d.buf = d.buf[:len(d.buf)-advance]
+
+			if len(result) > 0 && result[len(result)-1] == '\n' {
+				result = result[:len(result)-1]
+			}
+
+			return result, nil
+		}
+
+		if len(d.buf) == cap(d.buf) {
+			newBuf := make([]byte, len(d.buf), cap(d.buf)*2)
+			copy(newBuf, d.buf)
+			d.buf = newBuf
+		}
+
+		n, err := d.r.Read(d.buf[len(d.buf):cap(d.buf)])
+		if n > 0 {
+			d.buf = d.buf[:len(d.buf)+n]
+		}
+		if err != nil {
+			if err == io.EOF {
+				if len(d.buf) > 0 {
+					return nil, io.ErrUnexpectedEOF
 				}
-
-				arr = reflect.Append(arr, reflect.ValueOf(c).Elem())
+				return nil, io.EOF
 			}
-		case '"':
-			if !inString {
-				inString = true
-			} else {
-				inString = false
-			}
-		case '\\':
-			i++
-		case '{':
-			if !inString {
-				if inStruct == 0 {
-					start_i = i
-				}
-
-				inStruct++
-			}
-		case '}':
-			if !inString {
-				inStruct--
-			}
+			return nil, err
 		}
-
-		i++
 	}
-
-	f.Set(arr)
-	return nil
 }
 
-func UnmarshalSliceSlice(f reflect.Value, data string) error {
-	i := 0
-	start_i := 0
-	inSlice := 0
-	inString := false
-	data_len := len(data)
-	arr := f
-
-	for i < data_len {
-		switch data[i] {
-		case ',':
-			if inSlice == 0 && !inString {
-				ev := data[start_i:i]
-				c := reflect.New(f.Type().Elem()).Elem()
-				err := UnmarshalSlice(c, ev)
-
-				if err != nil {
-					return err
-				}
-
-				arr = reflect.Append(arr, c)
-			}
-		case '"':
-			if !inString {
-				inString = true
-			} else {
-				inString = false
-			}
-		case '\\':
-			i++
-		case '[':
-			if !inString {
-				if inSlice == 0 {
-					start_i = i
-				}
-
-				inSlice++
-			}
-		case ']':
-			if !inString {
-				inSlice--
-			}
-		}
-		i++
+func scanObjectBoundary(data []byte) (int, bool) {
+	if len(data) == 0 {
+		return 0, false
 	}
 
-	if i+1 >= data_len {
-		ev := data[start_i:data_len]
-		c := reflect.New(f.Type().Elem()).Elem()
-		err := UnmarshalSlice(c, ev)
-
-		if err != nil {
-			return err
-		}
-
-		arr = reflect.Append(arr, c)
+	start := 0
+	for start < len(data) && (data[start] == ' ' || data[start] == '\n' || data[start] == '\r' || data[start] == '\t') {
+		start++
+	}
+	if start == len(data) {
+		return start, false
 	}
 
-	f.Set(arr)
-	return nil
-}
-
-func UnmarshalSlice(f reflect.Value, v string) error {
-	switch f.Type().Elem().Kind() {
-	case reflect.String:
-		err := UnmarshalSliceString(f, v)
-
-		if err != nil {
-			return err
-		}
-	case reflect.Bool:
-		slice := []bool{}
-
-		for _, e := range strings.Split(v[1:len(v)-1], ",") {
-			switch e {
-			case "-":
-				slice = append(slice, false)
-			case "+":
-				slice = append(slice, true)
-			default:
-				return fmt.Errorf("can't convert %v to bool", e)
-			}
-		}
-
-		f.Set(reflect.ValueOf(slice))
-	case reflect.Int:
-		slice := []int{}
-
-		for _, e := range strings.Split(v[1:len(v)-1], ",") {
-			n, err := strconv.ParseInt(e, 10, 64)
-
-			if err != nil {
-				return err
-			}
-
-			slice = append(slice, int(n))
-		}
-
-		f.Set(reflect.ValueOf(slice))
-	case reflect.Int8:
-		slice := []int8{}
-
-		for _, e := range strings.Split(v[1:len(v)-1], ",") {
-			n, err := strconv.ParseInt(e, 10, 64)
-
-			if err != nil {
-				return err
-			}
-
-			slice = append(slice, int8(n))
-		}
-
-		f.Set(reflect.ValueOf(slice))
-	case reflect.Int16:
-		slice := []int16{}
-
-		for _, e := range strings.Split(v[1:len(v)-1], ",") {
-			n, err := strconv.ParseInt(e, 10, 64)
-
-			if err != nil {
-				return err
-			}
-
-			slice = append(slice, int16(n))
-		}
-
-		f.Set(reflect.ValueOf(slice))
-	case reflect.Int32:
-		slice := []int32{}
-
-		for _, e := range strings.Split(v[1:len(v)-1], ",") {
-			n, err := strconv.ParseInt(e, 10, 64)
-
-			if err != nil {
-				return err
-			}
-
-			slice = append(slice, int32(n))
-		}
-
-		f.Set(reflect.ValueOf(slice))
-	case reflect.Int64:
-		slice := []int64{}
-
-		for _, e := range strings.Split(v[1:len(v)-1], ",") {
-			n, err := strconv.ParseInt(e, 10, 64)
-
-			if err != nil {
-				return err
-			}
-
-			slice = append(slice, n)
-		}
-
-		f.Set(reflect.ValueOf(slice))
-	case reflect.Uint:
-		slice := []uint{}
-
-		for _, e := range strings.Split(v[1:len(v)-1], ",") {
-			n, err := strconv.ParseUint(e, 10, 32)
-
-			if err != nil {
-				return err
-			}
-
-			slice = append(slice, uint(n))
-		}
-
-		f.Set(reflect.ValueOf(slice))
-	case reflect.Uint8:
-		slice := []uint8{}
-
-		for _, e := range strings.Split(v[1:len(v)-1], ",") {
-			n, err := strconv.ParseUint(e, 10, 32)
-
-			if err != nil {
-				return err
-			}
-
-			slice = append(slice, uint8(n))
-		}
-
-		f.Set(reflect.ValueOf(slice))
-	case reflect.Uint16:
-		slice := []uint16{}
-
-		for _, e := range strings.Split(v[1:len(v)-1], ",") {
-			n, err := strconv.ParseUint(e, 10, 32)
-
-			if err != nil {
-				return err
-			}
-
-			slice = append(slice, uint16(n))
-		}
-
-		f.Set(reflect.ValueOf(slice))
-	case reflect.Uint32:
-		slice := []uint32{}
-
-		for _, e := range strings.Split(v[1:len(v)-1], ",") {
-			n, err := strconv.ParseUint(e, 10, 32)
-
-			if err != nil {
-				return err
-			}
-
-			slice = append(slice, uint32(n))
-		}
-
-		f.Set(reflect.ValueOf(slice))
-	case reflect.Uint64:
-		slice := []uint64{}
-
-		for _, e := range strings.Split(v[1:len(v)-1], ",") {
-			n, err := strconv.ParseUint(e, 10, 32)
-
-			if err != nil {
-				return err
-			}
-
-			slice = append(slice, n)
-		}
-
-		f.Set(reflect.ValueOf(slice))
-	case reflect.Float32:
-		slice := []float32{}
-
-		for _, e := range strings.Split(v[1:len(v)-1], ",") {
-			n, err := strconv.ParseFloat(e, 64)
-
-			if err != nil {
-				return err
-			}
-
-			slice = append(slice, float32(n))
-		}
-
-		f.Set(reflect.ValueOf(slice))
-	case reflect.Float64:
-		slice := []float64{}
-
-		for _, e := range strings.Split(v[1:len(v)-1], ",") {
-			n, err := strconv.ParseFloat(e, 64)
-
-			if err != nil {
-				return err
-			}
-
-			slice = append(slice, n)
-		}
-
-		f.Set(reflect.ValueOf(slice))
-	case reflect.Struct:
-		err := UnmarshalSliceStruct(f, v)
-
-		if err != nil {
-			return err
-		}
-	case reflect.Slice:
-		err := UnmarshalSliceSlice(f, v[1:len(v)-1])
-
-		if err != nil {
-			return err
-		}
-	}
-
-	return nil
-}
-
-func Unmarshal(data []byte, s any) error {
-	mut := reflect.ValueOf(s).Elem()
-	t := reflect.TypeOf(s).Elem()
-
-	i := 1
-	elm := 0
-	start_i := 1
-	inString := false
+	depth := 0
+	arrDepth := 0
+	inQuote := false
 	isEscaped := false
-	inSlice := 0
-	inStruct := 0
-	data_length := len(data) - 1
 
-	for i < data_length {
-		tags := t.Field(elm)
-		if tag := tags.Tag.Get("gido"); tag == "-" {
-			elm++
+	for i := start; i < len(data); i++ {
+		b := data[i]
+
+		if inQuote {
+			if isEscaped {
+				isEscaped = false
+			} else if b == '\\' {
+				isEscaped = true
+			} else if b == '"' {
+				inQuote = false
+			}
 			continue
 		}
 
-		switch data[i] {
-		case ',':
-			if inSlice == 0 && inStruct == 0 && !inString {
-				ev := data[start_i:i]
-
-				err := Validate(string(ev), mut, &elm)
-
-				if err != nil {
-					return err
-				}
-
-				start_i = i + 1
-				elm++
-			}
-		case '"':
-			if inStruct == 0 && inSlice == 0 {
-				if isEscaped {
-					isEscaped = false
-					i++
-					continue
-				}
-
-				if !inString {
-					start_i = i
-					inString = true
-				} else {
-					inString = false
-				}
-			}
-		case '\\':
-			isEscaped = true
+		switch b {
 		case '{':
-			if !inString && inSlice == 0 {
-				if inStruct == 0 {
-					start_i = i
-				}
-				inStruct++
-			}
+			depth++
 		case '}':
-			if inStruct > 0 {
-				inStruct--
-			}
+			depth--
 		case '[':
-			if inStruct == 0 && !inString {
-				inSlice++
-			}
+			arrDepth++
 		case ']':
-			if inStruct == 0 && !inString {
-				inSlice--
-			}
+			arrDepth--
+		case '"':
+			inQuote = true
 		}
 
-		if i+1 >= data_length {
-			ev := data[start_i:data_length]
-			err := Validate(string(ev), mut, &elm)
-
-			if err != nil {
-				return err
-			}
+		if depth == 0 && arrDepth == 0 {
+			return i + 1, true
 		}
-
-		i++
 	}
 
+	return 0, false
+}
+
+// ---------------------------------------------------------
+// STANDARD API (Unmarshal)
+// ---------------------------------------------------------
+
+func Unmarshal(data []byte, s any) error {
+	rv := reflect.ValueOf(s)
+	if rv.Kind() != reflect.Pointer || rv.IsNil() {
+		return fmt.Errorf("ido: Unmarshal(non-pointer %v)", reflect.TypeOf(s))
+	}
+
+	val := rv.Elem()
+	decoder, err := getDecoder(val.Type())
+	if err != nil {
+		return err
+	}
+
+	return decoder(data, val)
+}
+
+// ---------------------------------------------------------
+// COMPILER (Decoder)
+// ---------------------------------------------------------
+
+func getDecoder(t reflect.Type) (decoderFunc, error) {
+	if f, ok := decoderCache.Load(t); ok {
+		return f.(decoderFunc), nil
+	}
+	f, err := compileDecoder(t)
+	if err != nil {
+		return nil, err
+	}
+	decoderCache.Store(t, f)
+	return f, nil
+}
+
+func compileDecoder(t reflect.Type) (decoderFunc, error) {
+	// 1. Check if type T implements Unmarshaler
+	if t.Implements(unmarshalerType) {
+		return func(d []byte, v reflect.Value) error {
+			if v.Kind() == reflect.Pointer && v.IsNil() {
+				v.Set(reflect.New(v.Type().Elem()))
+			}
+			return v.Interface().(Unmarshaler).UnmarshalIDO(d)
+		}, nil
+	}
+
+	// 2. Check if *T implements Unmarshaler (when we have T)
+	if t.Kind() != reflect.Pointer && reflect.PointerTo(t).Implements(unmarshalerType) {
+		return func(d []byte, v reflect.Value) error {
+			if !v.CanAddr() {
+				return fmt.Errorf("ido: cannot unmarshal into unaddressable value")
+			}
+			return v.Addr().Interface().(Unmarshaler).UnmarshalIDO(d)
+		}, nil
+	}
+
+	// 3. Standard types
+	switch t.Kind() {
+	case reflect.String:
+		return decodeString, nil
+	case reflect.Bool:
+		return decodeBool, nil
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+		return decodeInt, nil
+	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr:
+		return decodeUint, nil
+	case reflect.Float32, reflect.Float64:
+		return decodeFloat, nil
+	case reflect.Slice:
+		return compileSliceDecoder(t)
+	case reflect.Struct:
+		if t == timeType {
+			return decodeTime, nil
+		}
+		return compileStructDecoder(t)
+	case reflect.Pointer:
+		elemDec, err := getDecoder(t.Elem())
+		if err != nil {
+			return nil, err
+		}
+		return func(d []byte, v reflect.Value) error {
+			if len(d) == 0 {
+				return nil
+			}
+			if v.IsNil() {
+				v.Set(reflect.New(t.Elem()))
+			}
+			return elemDec(d, v.Elem())
+		}, nil
+	case reflect.Interface:
+		return func(d []byte, v reflect.Value) error { return nil }, nil
+	default:
+		return nil, fmt.Errorf("unsupported type for decoding: %s", t)
+	}
+}
+
+func compileStructDecoder(t reflect.Type) (decoderFunc, error) {
+	type fieldInfo struct {
+		idx     int
+		decoder decoderFunc
+	}
+	var fields []fieldInfo
+
+	for i := 0; i < t.NumField(); i++ {
+		f := t.Field(i)
+		if f.Tag.Get("ido") == "-" {
+			continue
+		}
+		dec, err := compileDecoder(f.Type)
+		if err != nil {
+			return nil, err
+		}
+		fields = append(fields, fieldInfo{idx: i, decoder: dec})
+	}
+
+	return func(data []byte, v reflect.Value) error {
+		if len(data) < 2 {
+			return nil
+		}
+		content := data[1 : len(data)-1]
+		if len(content) == 0 {
+			return nil
+		}
+
+		for _, field := range fields {
+			if len(content) == 0 {
+				break
+			}
+
+			token, advance := nextToken(content)
+
+			if len(token) > 0 {
+				if err := field.decoder(token, v.Field(field.idx)); err != nil {
+					return err
+				}
+			}
+
+			if advance >= len(content) {
+				content = nil
+			} else {
+				content = content[advance:]
+			}
+		}
+		return nil
+	}, nil
+}
+
+func compileSliceDecoder(t reflect.Type) (decoderFunc, error) {
+	elemDec, err := compileDecoder(t.Elem())
+	if err != nil {
+		return nil, err
+	}
+
+	return func(data []byte, v reflect.Value) error {
+		if len(data) < 2 {
+			return nil
+		}
+		content := data[1 : len(data)-1]
+		if len(content) == 0 {
+			return nil
+		}
+
+		v.SetLen(0)
+
+		for len(content) > 0 {
+			token, advance := nextToken(content)
+
+			newElem := reflect.New(t.Elem()).Elem()
+			if len(token) > 0 {
+				if err := elemDec(token, newElem); err != nil {
+					return err
+				}
+			}
+			v.Set(reflect.Append(v, newElem))
+
+			if advance >= len(content) {
+				break
+			}
+			content = content[advance:]
+		}
+		return nil
+	}, nil
+}
+
+func nextToken(data []byte) (token []byte, advance int) {
+	depth := 0
+	arrDepth := 0
+	inQuote := false
+	isEscaped := false
+
+	for i, b := range data {
+		if inQuote {
+			if isEscaped {
+				isEscaped = false
+			} else if b == '\\' {
+				isEscaped = true
+			} else if b == '"' {
+				inQuote = false
+			}
+			continue
+		}
+
+		switch b {
+		case '{':
+			depth++
+		case '}':
+			depth--
+		case '[':
+			arrDepth++
+		case ']':
+			arrDepth--
+		case '"':
+			inQuote = true
+		case ',':
+			if depth == 0 && arrDepth == 0 {
+				return data[:i], i + 1
+			}
+		}
+	}
+	return data, len(data)
+}
+
+// ---------------------------------------------------------
+// PRIMITIVES (Decoder)
+// ---------------------------------------------------------
+
+func decodeString(d []byte, v reflect.Value) error {
+	if len(d) >= 2 && d[0] == '"' && d[len(d)-1] == '"' {
+		v.SetString(unescape(d[1 : len(d)-1]))
+	} else {
+		v.SetString(unsafeString(d))
+	}
 	return nil
+}
+
+func decodeBool(d []byte, v reflect.Value) error {
+	if len(d) == 1 && d[0] == '+' {
+		v.SetBool(true)
+	} else {
+		v.SetBool(false)
+	}
+	return nil
+}
+
+func decodeInt(d []byte, v reflect.Value) error {
+	if len(d) == 0 {
+		return nil
+	}
+	n, err := strconv.ParseInt(unsafeString(d), 10, 64)
+	if err != nil {
+		return err
+	}
+	v.SetInt(n)
+	return nil
+}
+
+func decodeUint(d []byte, v reflect.Value) error {
+	if len(d) == 0 {
+		return nil
+	}
+	n, err := strconv.ParseUint(unsafeString(d), 10, 64)
+	if err != nil {
+		return err
+	}
+	v.SetUint(n)
+	return nil
+}
+
+func decodeFloat(d []byte, v reflect.Value) error {
+	if len(d) == 0 {
+		return nil
+	}
+	n, err := strconv.ParseFloat(unsafeString(d), 64)
+	if err != nil {
+		return err
+	}
+	v.SetFloat(n)
+	return nil
+}
+
+func decodeTime(d []byte, v reflect.Value) error {
+	if len(d) == 0 {
+		return nil
+	}
+	n, err := strconv.ParseInt(unsafeString(d), 10, 64)
+	if err != nil {
+		return nil
+	}
+	v.Set(reflect.ValueOf(time.UnixMicro(n).UTC()))
+	return nil
+}
+
+func unescape(b []byte) string {
+	hasEscape := false
+	for _, c := range b {
+		if c == '\\' {
+			hasEscape = true
+			break
+		}
+	}
+	if !hasEscape {
+		return string(b)
+	}
+	out := make([]byte, 0, len(b))
+	for i := 0; i < len(b); i++ {
+		if b[i] == '\\' && i+1 < len(b) && b[i+1] == '"' {
+			out = append(out, '"')
+			i++
+		} else {
+			out = append(out, b[i])
+		}
+	}
+	return string(out)
 }
